@@ -170,6 +170,7 @@ class EventBus:
         await self._set_state(event, EventState.DISPATCHED)
 
         if self._expired(event):
+            await self._set_state(event, EventState.FAILED)
             await self._set_state(event, EventState.DEAD_LETTER)
             self._metric_increment("event.expired")
             await self._audit_record(event, "dead_lettered", "event TTL expired")
@@ -189,19 +190,15 @@ class EventBus:
 
         failed = any(result is not AckStatus.ACK for result in results)
         if failed:
-            if event.routing.delivery_mode.value == "at_most_once":
+            if event.routing.delivery_mode.value in {"at_most_once", "exactly_once"}:
+                await self._set_state(event, EventState.FAILED)
                 await self._set_state(event, EventState.DEAD_LETTER)
-                await self._audit_record(event, "dead_lettered", "at-most-once failure")
-                self._metric_increment("event.dead_lettered")
-                return
-
-            if event.routing.delivery_mode.value == "exactly_once":
-                await self._set_state(event, EventState.DEAD_LETTER)
-                await self._audit_record(
-                    event,
-                    "dead_lettered",
-                    "exactly-once requires an idempotency store adapter",
+                detail = (
+                    "at-most-once failure"
+                    if event.routing.delivery_mode.value == "at_most_once"
+                    else "exactly-once requires an idempotency store adapter"
                 )
+                await self._audit_record(event, "dead_lettered", detail)
                 self._metric_increment("event.dead_lettered")
                 return
 
@@ -219,6 +216,7 @@ class EventBus:
                 await self._queue.put(_Envelope(event=event, attempt=attempt + 1))
                 return
 
+            await self._set_state(event, EventState.FAILED)
             await self._set_state(event, EventState.DEAD_LETTER)
             self._metric_increment("event.dead_lettered")
             await self._audit_record(
