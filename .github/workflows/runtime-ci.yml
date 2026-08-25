@@ -1,0 +1,35 @@
+name: Runtime CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "runtime/**"
+      - "pyproject.toml"
+      - ".github/workflows/runtime-ci.yml"
+
+jobs:
+  event-bus:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install development dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Ruff
+        run: ruff check runtime/event_bus
+
+      - name: MyPy
+        run: mypy runtime/event_bus
+
+      - name: Pytest
+        run: pytest runtime/event_bus/tests --cov=runtime.event_bus --cov-report=term-missing
