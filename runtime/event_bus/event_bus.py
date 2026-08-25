@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from time import monotonic
 from typing import DefaultDict, Sequence
 
@@ -19,14 +20,7 @@ from .exceptions import (
     RetryExhaustedError,
 )
 from .interfaces import AuditSink, MetricsSink, Router, Subscriber
-from .models import (
-    AckStatus,
-    Event,
-    EventState,
-    RoutingMetadata,
-    can_transition,
-    transition,
-)
+from .models import AckStatus, Event, EventState, can_transition
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,7 +32,7 @@ class _Envelope:
 
 
 class StaticTopicRouter:
-    """Default router that resolves a topic against registered subscribers."""
+    """Default deterministic router backed by in-process subscriptions."""
 
     def __init__(self, subscriptions: DefaultDict[str, set[str]]) -> None:
         self._subscriptions = subscriptions
@@ -50,9 +44,9 @@ class StaticTopicRouter:
 class EventBus:
     """Async Event Bus reference implementation.
 
-    The class deliberately depends only on protocol interfaces and the Python
-    standard library. Production deployments can replace routing, telemetry,
-    persistence and subscriber resolution without changing the domain API.
+    The runtime is infrastructure-neutral and depends on protocols for routing,
+    telemetry and subscribers. External adapters can therefore replace the
+    in-memory pieces without changing the domain contract.
     """
 
     def __init__(
@@ -91,7 +85,7 @@ class EventBus:
         ]
 
     async def stop(self) -> None:
-        """Stop workers after draining queued work."""
+        """Drain accepted work and stop workers gracefully."""
         if not self._running:
             self._closed = True
             return
@@ -103,7 +97,12 @@ class EventBus:
         self._workers.clear()
         self._closed = True
 
-    async def subscribe(self, topic: str, subscriber_id: str, subscriber: Subscriber) -> None:
+    async def subscribe(
+        self,
+        topic: str,
+        subscriber_id: str,
+        subscriber: Subscriber,
+    ) -> None:
         """Register a subscriber for a topic."""
         self._ensure_open()
         if not topic.strip() or not subscriber_id.strip():
@@ -118,21 +117,31 @@ class EventBus:
             self._subscribers.pop(subscriber_id, None)
 
     async def publish(self, event: Event) -> None:
-        """Validate, authorize and enqueue an event for delivery."""
+        """Validate, authenticate, authorize, route and enqueue an event."""
         self._ensure_open()
+        if not self._running:
+            raise EventBusClosedError("event bus must be started before publish")
+
         self._validate_event(event)
         await self._set_state(event, EventState.VALIDATED)
+
         if not event.security.authenticated:
             await self._fail(event, AuthenticationError("event is not authenticated"))
         await self._set_state(event, EventState.AUTHENTICATED)
+
         if not event.security.authorized:
             await self._fail(event, AuthorizationError("event is not authorized"))
         await self._set_state(event, EventState.AUTHORIZED)
+
         await self._set_state(event, EventState.ENRICHED)
         await self._set_state(event, EventState.PERSISTED)
+
         subscribers = tuple(await self._router.resolve(event))
         if not subscribers:
-            await self._fail(event, DispatchError("no subscribers matched the event topic"))
+            await self._fail(
+                event,
+                DispatchError("no subscribers matched the event topic"),
+            )
         await self._set_state(event, EventState.ROUTED)
         await self._set_state(event, EventState.QUEUED)
         self._state[str(event.event_id)] = EventState.QUEUED
@@ -148,7 +157,10 @@ class EventBus:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                LOGGER.exception("event dispatch worker failed", extra={"worker_id": worker_id})
+                LOGGER.exception(
+                    "event dispatch worker failed",
+                    extra={"worker_id": worker_id},
+                )
             finally:
                 self._queue.task_done()
 
@@ -156,6 +168,13 @@ class EventBus:
         event = envelope.event
         attempt = envelope.attempt
         await self._set_state(event, EventState.DISPATCHED)
+
+        if self._expired(event):
+            await self._set_state(event, EventState.DEAD_LETTER)
+            self._metric_increment("event.expired")
+            await self._audit_record(event, "dead_lettered", "event TTL expired")
+            return
+
         subscribers = tuple(await self._router.resolve(event))
         if not subscribers:
             await self._fail(event, DispatchError("subscriber set became empty"))
@@ -168,19 +187,45 @@ class EventBus:
         elapsed_ms = (monotonic() - started) * 1000
         self._metric_observe("event.dispatch_latency_ms", elapsed_ms)
 
-        if any(result is not AckStatus.ACK for result in results):
+        failed = any(result is not AckStatus.ACK for result in results)
+        if failed:
+            if event.routing.delivery_mode.value == "at_most_once":
+                await self._set_state(event, EventState.DEAD_LETTER)
+                await self._audit_record(event, "dead_lettered", "at-most-once failure")
+                self._metric_increment("event.dead_lettered")
+                return
+
+            if event.routing.delivery_mode.value == "exactly_once":
+                await self._set_state(event, EventState.DEAD_LETTER)
+                await self._audit_record(
+                    event,
+                    "dead_lettered",
+                    "exactly-once requires an idempotency store adapter",
+                )
+                self._metric_increment("event.dead_lettered")
+                return
+
             if attempt <= self.config.retry_policy.max_retries:
                 await self._set_state(event, EventState.RETRY_PENDING)
                 delay = self._retry_delay_ms(attempt)
                 self._metric_increment("event.retry_scheduled")
-                await self._audit_record(event, "retry_scheduled", f"attempt={attempt}")
+                await self._audit_record(
+                    event,
+                    "retry_scheduled",
+                    f"attempt={attempt}",
+                )
                 await asyncio.sleep(delay / 1000)
                 await self._set_state(event, EventState.QUEUED)
                 await self._queue.put(_Envelope(event=event, attempt=attempt + 1))
                 return
+
             await self._set_state(event, EventState.DEAD_LETTER)
             self._metric_increment("event.dead_lettered")
-            await self._audit_record(event, "dead_lettered", "retry policy exhausted")
+            await self._audit_record(
+                event,
+                "dead_lettered",
+                "retry policy exhausted",
+            )
             raise RetryExhaustedError(str(event.event_id))
 
         await self._set_state(event, EventState.DELIVERED)
@@ -192,7 +237,8 @@ class EventBus:
     async def _deliver(self, event: Event, subscriber_id: str) -> AckStatus:
         subscriber = self._subscribers.get(subscriber_id)
         if subscriber is None:
-            raise DispatchError(f"subscriber not registered: {subscriber_id}")
+            self._metric_increment("delivery.failure")
+            return AckStatus.NACK
         try:
             return await asyncio.wait_for(
                 subscriber.receive(event),
@@ -217,25 +263,32 @@ class EventBus:
                 return
             if not can_transition(current, target):
                 raise EventValidationError(
-                    str(transition(current, target))
+                    f"invalid lifecycle transition: {current.value} -> {target.value}"
                 )
             self._state[event_id] = target
         await self._audit_record(event, "lifecycle", target.value)
 
     async def _fail(self, event: Event, error: Exception) -> None:
         current = self._state.get(str(event.event_id), EventState.CREATED)
-        if current is not EventState.FAILED and can_transition(current, EventState.FAILED):
+        if current is not EventState.FAILED and can_transition(
+            current, EventState.FAILED
+        ):
             await self._set_state(event, EventState.FAILED)
         await self._audit_record(event, "failed", str(error))
         raise error
 
     def _validate_event(self, event: Event) -> None:
-        if event.security.authenticated is not True:
-            raise AuthenticationError("event authentication failed")
-        if event.security.authorized is not True:
-            raise AuthorizationError("event authorization failed")
         if not event.routing.topic.strip():
             raise EventValidationError("event topic must not be empty")
+        if event.routing.ttl_seconds is not None and event.routing.ttl_seconds < 0:
+            raise EventValidationError("event TTL must be non-negative")
+
+    def _expired(self, event: Event) -> bool:
+        ttl = event.routing.ttl_seconds
+        if ttl is None:
+            return False
+        timestamp = event.timestamp.astimezone(timezone.utc)
+        return (datetime.now(timezone.utc) - timestamp).total_seconds() > ttl
 
     def _retry_delay_ms(self, attempt: int) -> int:
         policy = self.config.retry_policy
