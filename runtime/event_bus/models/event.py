@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import UUID
 
 
 SPEC_VERSION = "1.0.0"
+_EVENT_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{2,99}$")
 
 
 class EventType(StrEnum):
@@ -116,6 +119,10 @@ class EventMetadata:
     labels: Mapping[str, str] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "labels", MappingProxyType(dict(self.labels)))
+        object.__setattr__(self, "extra", MappingProxyType(dict(self.extra)))
+
 
 @dataclass(frozen=True, slots=True)
 class Event:
@@ -145,16 +152,13 @@ class Event:
             )
         if self.timestamp.tzinfo is None:
             raise ValueError("event timestamp must be timezone-aware")
-        if self.event_name is not None:
-            if not self.event_name[0].isalpha() or not all(
-                character.isalnum() or character in "_.-"
-                for character in self.event_name
-            ):
-                raise ValueError("event_name contains invalid characters")
-            if not 3 <= len(self.event_name) <= 101:
-                raise ValueError("event_name length is outside contract bounds")
+        if self.event_name is not None and not _EVENT_NAME_PATTERN.fullmatch(
+            self.event_name
+        ):
+            raise ValueError("event_name does not match the runtime contract")
         if not isinstance(self.payload, Mapping):
             raise TypeError("event payload must be a mapping")
+        object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
 
     @classmethod
     def create(
@@ -178,7 +182,7 @@ class Event:
             source=source,
             timestamp=timestamp or datetime.now(timezone.utc),
             correlation_id=correlation_id,
-            payload=dict(payload),
+            payload=payload,
             security=security,
             routing=routing,
             event_name=event_name,
