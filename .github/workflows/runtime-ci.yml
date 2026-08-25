@@ -10,7 +10,7 @@ on:
       - ".github/workflows/runtime-ci.yml"
 
 jobs:
-  event-bus:
+  runtime:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -26,10 +26,16 @@ jobs:
         run: python -m pip install -e ".[dev]"
 
       - name: Ruff
-        run: ruff check runtime/event_bus
+        run: ruff check runtime/event_bus runtime/replay_engine
 
       - name: MyPy
-        run: mypy runtime/event_bus --exclude '(^|/)tests/'
+        run: >-
+          mypy runtime/event_bus runtime/replay_engine
+          --exclude '(^|/)tests/'
 
       - name: Pytest
-        run: pytest runtime/event_bus/tests --cov=runtime.event_bus --cov-report=term-missing
+        run: >-
+          pytest runtime/event_bus/tests runtime/replay_engine/tests
+          --cov=runtime.event_bus
+          --cov=runtime.replay_engine
+          --cov-report=term-missing
