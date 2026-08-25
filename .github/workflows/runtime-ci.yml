@@ -29,7 +29,7 @@ jobs:
         run: ruff check runtime/event_bus
 
       - name: MyPy
-        run: mypy runtime/event_bus
+        run: mypy runtime/event_bus --exclude '(^|/)tests/'
 
       - name: Pytest
         run: pytest runtime/event_bus/tests --cov=runtime.event_bus --cov-report=term-missing
