@@ -1,410 +1,253 @@
 # Agent Communication Protocol (ACP)
 
-**Document ID:** AOS-004
+**Document ID:** AITOS-ACP-001  
+**Version:** 1.1.0  
+**Status:** Active / Normative  
+**Owner:** AITOS Engineering  
+**Scope:** Agent-to-agent, agent-to-runtime, and governed human-agent communication
 
-**Version:** 1.0.0
+## 1. Purpose
 
-**Status:** Active
+ACP defines the canonical communication contract for AITOS agents. It standardizes identity, routing, correlation, delegation, context exchange, memory synchronization, failure handling, security, auditability, and protocol compatibility.
 
-**Owner:** AITOS Engineering
+ACP is transport-neutral. An implementation may use the AITOS Event Bus, HTTP, WebSocket, a message broker, or another approved transport, but the logical ACP contract remains unchanged.
 
-**Classification:** Internal
+## 2. Normative Language
 
-**Last Updated:** 2026-07-06
+The terms **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** are normative.
 
----
+## 3. Message Envelope
 
-# Purpose
+Every ACP message MUST contain:
 
-The Agent Communication Protocol (ACP) defines the official communication standard for all AI agents operating within the AITOS AI Operating System (AOS).
+- `message_id` — globally unique identifier
+- `protocol` — protocol name and version
+- `message_type`
+- `timestamp`
+- `sender`
+- `receiver` or broadcast scope
+- `correlation_id`
+- `payload`
+- `security`
+- `status`
 
-ACP standardizes how AI agents:
+The following SHOULD be supplied when applicable:
 
-- communicate,
-- exchange context,
-- delegate work,
-- coordinate execution,
-- synchronize memory,
-- resolve conflicts,
-- report failures,
-- maintain auditability.
+- `causation_id`
+- `conversation_id`
+- `task_id`
+- `workflow_id`
+- `context_ref`
+- `memory_refs`
+- `trace`
+- `deadline`
+- `idempotency_key`
+- `capability_requirements`
 
-The protocol enables reliable, secure, and governed multi-agent collaboration.
+Unknown top-level fields MUST NOT change the meaning of an existing field. Schema evolution MUST follow the AITOS versioning policy.
 
----
+## 4. Message Types
 
-# Scope
+The canonical types are:
 
-ACP applies to:
+- `REQUEST`
+- `RESPONSE`
+- `EVENT`
+- `ERROR`
+- `BROADCAST`
+- `DELEGATION`
+- `MEMORY_SYNC`
+- `CONTEXT_EXCHANGE`
+- `PROPOSAL`
+- `APPROVAL_REQUEST`
+- `REVIEW`
+- `WARNING`
 
-- AI Agents
-- Human-Agent collaboration
-- Agent-to-Agent communication
-- Agent orchestration
-- Distributed AI workflows
-- External AI integrations
+Implementations MAY define domain-specific subtypes under a versioned namespace.
 
----
+## 5. Identity and Trust
 
-# Communication Principles
+A sender MUST be authenticated before privileged communication is accepted.
 
-All communication shall be:
+A receiver MUST verify:
 
-- Structured
-- Traceable
-- Context-aware
-- Secure
-- Deterministic where possible
-- Human-reviewable
-- Version controlled
+1. sender identity,
+2. protocol compatibility,
+3. capability requirements,
+4. authorization for the requested operation,
+5. message integrity when integrity protection is required.
 
-Messages should never bypass repository governance.
+Trust is not inferred from network location.
 
----
+## 6. Correlation and Causation
 
-# Communication Architecture
+`correlation_id` identifies the logical operation across multiple messages.
 
+`causation_id` identifies the message/event that directly caused the current message.
+
+Delegated work MUST preserve the parent correlation chain.
+
+## 7. Delegation
+
+Delegation MUST include:
+
+- parent task/correlation identifier,
+- delegated task identifier,
+- required capability,
+- permission scope,
+- deadline or cancellation policy where applicable,
+- expected result contract.
+
+Delegation transfers execution responsibility but never transfers governance accountability.
+
+## 8. Context Exchange
+
+Context exchange MUST be:
+
+- scoped to the task,
+- version-aware,
+- provenance-preserving,
+- authorization-filtered,
+- bounded by an explicit context budget where applicable.
+
+Agents MUST NOT receive protected context solely because another agent can access it.
+
+## 9. Memory Synchronization
+
+Memory synchronization MUST identify:
+
+- memory record/version,
+- source agent,
+- provenance,
+- operation (`create`, `update`, `delete`, `merge`),
+- conflict/version information,
+- authorization context.
+
+Unvalidated or speculative output MUST NOT silently become durable institutional memory.
+
+## 10. Delivery Semantics
+
+ACP transport adapters MUST declare delivery semantics:
+
+- `at_most_once`
+- `at_least_once`
+- `exactly_once`
+
+Exactly-once processing MUST NOT be claimed unless a durable idempotency mechanism and recovery semantics are actually implemented.
+
+At-least-once delivery requires idempotent consumers or explicit duplicate handling.
+
+## 11. Retry and Failure
+
+Retry is permitted only for classified transient failures.
+
+Retry MUST respect:
+
+- maximum attempts,
+- backoff,
+- deadline,
+- cancellation,
+- idempotency requirements.
+
+Permanent authorization, validation, policy, or contract errors MUST NOT be retried automatically.
+
+Failures MUST use the canonical AITOS error taxonomy when an error contract is available.
+
+## 12. Human Approval
+
+Human approval MUST be supported for governance-defined operations, including security-sensitive changes, production releases, risk acceptance, and live-trading activation.
+
+An agent MUST NOT represent a recommendation as an approval.
+
+## 13. Audit Requirements
+
+Privileged or material ACP messages MUST produce an auditable record containing, at minimum:
+
+- message ID,
+- timestamp,
+- sender and receiver,
+- correlation/task ID,
+- operation,
+- authorization result,
+- outcome,
+- relevant version references.
+
+Audit records MUST be protected against unauthorized modification.
+
+## 14. Security Requirements
+
+ACP implementations MUST enforce:
+
+- authentication,
+- authorization,
+- least privilege,
+- input/schema validation,
+- secret isolation,
+- sensitive-data minimization,
+- replay protection where required,
+- integrity protection where required.
+
+Security failures MUST fail closed.
+
+## 15. Protocol Negotiation
+
+Peers MUST negotiate or otherwise establish a mutually supported ACP version before using version-sensitive features.
+
+A receiver MUST reject unsupported mandatory features rather than silently approximating them.
+
+Backward-compatible additions SHOULD be made within the same major protocol version. Breaking changes require a major version increment and migration strategy.
+
+## 16. Lifecycle
+
+```text
+CREATE
+  ↓
+VALIDATE
+  ↓
+AUTHORIZE
+  ↓
+ROUTE
+  ↓
+DELIVER
+  ↓
+PROCESS
+  ↓
+ACK / RESPOND
+  ↓
+AUDIT
 ```
-Human
-   │
-   ▼
-Coordinator Agent
-   │
-   ├─────────────┐
-   ▼             ▼
-Research      Architecture
-   │             │
-   ▼             ▼
-Documentation  Coding
-      │
-      ▼
-Testing
-      │
-      ▼
-Security
-      │
-      ▼
-Repository
-```
 
-Coordinator agents orchestrate.
-
-Specialized agents execute.
-
----
-
-# Message Lifecycle
-
-```
-Create
-   ↓
-Validate
-   ↓
-Route
-   ↓
-Receive
-   ↓
-Process
-   ↓
-Respond
-   ↓
-Log
-   ↓
-Archive
-```
-
-Every significant communication should be logged.
-
----
-
-# Message Structure
-
-Every ACP message should contain:
-
-- Message ID
-- Protocol Version
-- Timestamp
-- Sender
-- Receiver
-- Conversation ID
-- Task ID
-- Message Type
-- Priority
-- Context Reference
-- Memory Reference
-- Payload
-- Status
-
----
-
-# Message Types
-
-## REQUEST
-
-Requests work from another agent.
-
----
-
-## RESPONSE
-
-Returns requested information.
-
----
-
-## PROPOSAL
-
-Suggests a solution requiring review.
-
----
-
-## APPROVAL_REQUEST
-
-Requests human approval.
-
----
-
-## REVIEW
-
-Provides review findings.
-
----
-
-## CONTEXT_UPDATE
-
-Shares updated context.
-
----
-
-## MEMORY_UPDATE
-
-Publishes institutional memory changes.
-
----
-
-## WARNING
-
-Reports potential risks.
-
----
-
-## ERROR
-
-Reports execution failures.
-
----
-
-## EVENT
-
-Broadcasts lifecycle or operational events.
-
----
-
-# Priority Levels
-
-P0 — Critical
-
-Immediate attention required.
-
----
-
-P1 — High
-
-Important engineering work.
-
----
-
-P2 — Normal
-
-Standard engineering communication.
-
----
-
-P3 — Low
-
-Informational messages.
-
----
-
-# Task Delegation
-
-Delegation is permitted only when:
-
-- The receiving agent has the required capability.
-- Required permissions exist.
-- Responsibilities remain traceable.
-
-Delegation transfers execution.
-
-Delegation never transfers accountability.
-
----
-
-# Context Exchange
-
-Before processing work an agent should receive:
-
-- Relevant repository context
-- Active standards
-- Applicable ADRs
-- Active RFCs
-- Project metadata
-
-Context exchange should minimize unnecessary information while preserving correctness.
-
----
-
-# Memory Synchronization
-
-Agents should synchronize:
-
-- Engineering decisions
-- Accepted patterns
-- Lessons learned
-- New terminology
-- Workflow improvements
-
-Memory synchronization should occur only after validated changes.
-
----
-
-# Conflict Resolution
-
-When conflicting outputs occur:
-
-1. Detect conflict.
-2. Compare supporting evidence.
-3. Escalate unresolved conflicts.
-4. Request human review.
-5. Record final resolution.
-
-Conflict resolution should preserve engineering history.
-
----
-
-# Failure Handling
-
-Failures include:
-
-- Context loading failure
-- Memory inconsistency
-- Permission denial
-- Invalid task
-- Dependency failure
-- Timeout
-- Unsupported capability
-
-Recovery should prioritize consistency over speed.
-
----
-
-# Retry Policy
-
-Retry only when:
-
-- Failure is transient.
-- Context remains valid.
-- Duplicate execution is safe.
-
-Maximum retry limits should be configurable.
-
----
-
-# Security Requirements
-
-All communications should:
-
-- Respect permission boundaries
-- Avoid exposing sensitive information
-- Validate sender identity
-- Validate receiver capability
-- Preserve message integrity
-
-Security policies take precedence over communication convenience.
-
----
-
-# Human Interaction
-
-Human review is mandatory for:
-
-- Governance decisions
-- Architectural changes
-- Security-sensitive operations
-- Production releases
-- Risk acceptance
-
-ACP should support seamless human intervention.
-
----
-
-# Audit Logging
-
-Every significant message should be logged with:
-
-- Message ID
-- Timestamp
-- Sender
-- Receiver
-- Task
-- Outcome
-- Review status
-- Related ADR
-- Related RFC
-
-Audit logs should be immutable.
-
----
-
-# Compliance
-
-Before accepting communication verify:
-
-✓ Protocol version supported
-
-✓ Sender registered
-
-✓ Receiver registered
-
-✓ Capability verified
-
-✓ Permissions verified
-
-✓ Context available
-
-✓ Memory synchronized
-
-✓ Logging enabled
-
----
-
-# Performance Objectives
-
-ACP should optimize for:
-
-- Reliability
-- Low ambiguity
-- High traceability
-- Context accuracy
-- Minimal duplication
-- Scalable orchestration
-
----
-
-# Cross References
-
-- AI Operating System (AOS)
-- AI Agent Governance
-- AI Agent Lifecycle
-- AI Agent Capability Model
-- Agent Memory Model
-- Agent Context Loading
-- Agent Registry
-- Engineering Governance Framework
-
----
-
-# Change Log
+Failed messages enter the applicable error/retry/DLQ path according to runtime policy.
+
+## 17. Compliance Checklist
+
+Before accepting a privileged message, the runtime MUST verify:
+
+- protocol supported,
+- sender authenticated,
+- receiver/capability valid,
+- authorization granted,
+- schema valid,
+- correlation valid,
+- context access allowed,
+- delivery semantics supported,
+- idempotency requirements satisfied,
+- audit path available.
+
+## 18. Cross References
+
+- `runtime/contracts/event_contract.json`
+- `ERROR_CODES.md`
+- `VERSIONING.md`
+- `REGISTRY_SCHEMA.md`
+- Agent Lifecycle
+- Agent Security Policy
+- Agent Capability Model
+- Context and Memory specifications
+
+## Change Log
 
 | Version | Date | Description |
-|----------|------------|----------------------------------------------|
-| 1.0.0 | 2026-07-06 | Initial Agent Communication Protocol (ACP) |
+|---|---|---|
+| 1.1.0 | 2026-08-26 | Converted ACP from descriptive guidance into a normative transport-neutral protocol contract. |
+| 1.0.0 | 2026-07-06 | Initial ACP framework. |
